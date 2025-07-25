@@ -1,0 +1,655 @@
+---
+title: "ADA Group Assignment"
+output:
+  html_document: default
+  word_document: default
+date: "2025-02-11"
+---
+
+# Setup
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(ggplot2)
+library(gridExtra)
+library(kableExtra)
+library(knitr)
+library(dplyr)
+library(DT)
+library(ggcorrplot)
+library(corrplot)
+library(GGally)
+library(Hmisc)
+library(emmeans)
+library(car)
+library(ggeffects)
+library(effectsize)
+library(pwr)
+```
+
+```{r}
+df <- read_csv('ADAproject_-5_data.csv')
+head(df)
+```
+
+## Data Dictionary
+
+| Variable | Description |
+|------------------------------------|------------------------------------|
+| Variant | The experimental variant randomly assigned to each loan officer; Control and Treatment |
+| loanofficer_id | Unique identifier for each loan officer |
+| day | The day of the experiment (e.g. 1 means 1st day, 2 means 2nd day, etc.) |
+| typeI_init | Count of Each Loan officer’s Type I errors (false positives – rejecting good loans) before seeing computer predictions |
+| typeI_fin | Count of Each Loan officer’s Type I errors (false positives – rejecting good loans) after seeing computer predictions |
+| typeII_init | Count of Each Loan officer’s Type II errors (false negatives – approving bad loans) before seeing computer predictions |
+| typeII_fin | Count of Each Loan officer’s Type II errors (false negatives – approving bad loans) after seeing computer predictions |
+| ai_typeI | Count of computer model's Type I errors (false positives – rejecting good loans) |
+| ai_typeII | Count of computer model's Type II errors (false negatives – approving bad loans) |
+| badloans_num | Number of bad loans (loans that defaulted) |
+| goodloans_num | Number of good loans (loans that were paid back on time) |
+| agree_init | Count of Each Loan officer’s agreements with computer predictions before seeing computer predictions |
+| agree_fin | Count of Each Loan officer’s agreements with computer predictions after seeing computer predictions |
+| conflict_init | Count of Each Loan officer’s conflicts with computer predictions before seeing computer predictions |
+| conflict_fin | Count of Each Loan officer’s conflicts with computer predictions after seeing computer predictions |
+| revised_per_ai | Count of Each Loan officer’s decisions that were revised to follow computer predictions |
+| revised_agst_ai | Count of Each Loan officer’s decisions that were revised to go against computer predictions |
+| confidence_init_total | Sum of confidence ratings given by each Loan Officer to their completed loan review decisions (how sure they were in their decisions) before seeing computer predictions |
+| confidence_fin_total | Sum of confidence ratings given by each Loan Officer to their completed loan review decisions (how sure they were in their decisions) after seeing computer predictions |
+| complt_init | Count of Initial loan review decisions completed by each Loan Officer before seeing computer predictions |
+| complt_fin | Count of Final loan review decisions completed by each Loan Officer after seeing computer predictions |
+| fully_complt | Count of each loan officer’s fully completed loan reviews (in both stages – before and after seeing computer predictions) |
+| type1_init_ratio | The Ratio of initial type 1 errors to total initial decisions |
+| type1_fin_ratio | The Ratio of final type 1 errors to total final decisions |
+| type2_init_ratio | The Ratio of initial type 2 errors to total initial decisions |
+| type2_fin_ratio | The Ratio of final type 2 errors to total final decisions |
+| error_init_ratio | Calculated as 0.5 \* type1_init_ratio + 0.5 \* type2_init_ratio, the error_init_ratio measures the average proportion of errors in initial decisions out of total initial decisions |
+| error_fin_ratio | Calculated as 0.5 \* type1_fin_ratio + 0.5 \* type2_fin_ratio, the error_fin_ratio measures the average proportion of errors in final decisions out of total final decisions |
+| type1_ratio_change | The difference between the final type 1 error ratio and initial type 1 error ratio |
+| type2_ratio_change | The difference between the final type 2 error ratio and initial type 2 error ratio |
+| error_ratio_change | The difference between the final error ratio and the initial error ratio |
+| agreement_change | The difference between the final decision agreement and initial decision agreement |
+| conflict_change | The difference between the final decision conflict and initial decision conflict |
+| confidence_change | The differnce bteween the final loan officer confidence and initial loan officer confidence |
+| FP_init | Count of False Positives (incorrectly predicted positives) in the initial review. |
+| FN_init | Count of False Negatives (incorrectly predicted negatives) in the initial review. |
+| TP_init | Count of True Positives (correctly predicted positives) in the initial review. |
+| TN_init | Count of True Negatives (correctly predicted negatives) in the initial review. |
+| FP_fin | Count of False Positives in the final review. |
+| FN_fin | Count of False Negatives in the final review. |
+| TP_fin | Count of True Positives in the final review. |
+| TN_fin | Count of True Negatives in the final review. |
+| precision_init | Precision score in the initial review (`TP / (TP + FP)`). |
+| recall_init | Recall score in the initial review (`TP / (TP + FN)`). |
+| f1_score_init | F1-score in the initial review, the harmonic mean of precision and recall. |
+| precision_fin | Precision score in the final review. |
+| recall_fin | Recall score in the final review. |
+| f1_score_fin | F1-score in the final review. |
+| precision_change | Change in precision between the initial and final review (`precision_fin - precision_init`). |
+| recall_change | Change in recall between the initial and final review (`recall_fin - recall_init`). |
+| f1_score_change | Change in F1-score between the initial and final review (`f1_score_fin - f1_score_init`). |
+
+# Data Preparation
+
+## Data Cleaning
+
+```{r}
+# Removing all rows where fully_complt is less than 10
+df <- df %>% filter(fully_complt == 10)
+
+# Validate confidence ratings (assuming scale 0-100)
+df <- df %>%
+  mutate(confidence_check = ifelse(confidence_init_total > 1000 | 
+                                   confidence_fin_total > 1000, 
+                                 "Check Rating", "OK"))
+df %>% count(confidence_check)
+
+# Deduplication
+# --------------------------
+df <- df %>%
+  distinct(loanofficer_id, day, .keep_all = TRUE)
+
+# Checking for null values
+df[!complete.cases(df), ]
+```
+
+## Data Transformation (Pre-Aggregation)
+
+```{r}
+# Creating calculated columns of the ratio of erros (type1, type2 & initial, final) by total decisions.
+df$type1_init_ratio <- df$typeI_init / df$complt_init
+df$type1_fin_ratio  <- df$typeI_fin / df$complt_fin
+df$type2_init_ratio <- df$typeII_init / df$complt_init
+df$type2_fin_ratio  <- df$typeII_fin / df$complt_fin
+
+# Creating a composite error terms
+df$error_init_ratio <- 0.5 * (df$type1_init_ratio) + 0.5 * (df$type2_init_ratio)
+df$error_fin_ratio <- 0.5 * (df$type1_fin_ratio) + 0.5 * (df$type2_fin_ratio)
+
+# Creating Change variables (Final - Initial) for all relevant columns
+df$type1_ratio_change = df$type1_fin_ratio - df$type1_init_ratio
+df$type2_ratio_change = df$type2_fin_ratio - df$type2_init_ratio
+df$error_ratio_change = df$error_fin_ratio - df$error_init_ratio
+df$agreement_change = df$agree_fin - df$agree_init
+df$conflict_change = df$conflict_fin - df$conflict_init
+df$confidence_change <- df$confidence_fin_total - df$confidence_init_total
+```
+
+```{r}
+# Create a copy of the dataframe before aggregation
+df_pre_agg <- df
+```
+
+## Data Aggregation
+
+Aggregating by Variant and loanofficer_id
+
+```{r}
+df <- df %>%
+  group_by(Variant, loanofficer_id) %>%
+  summarise(
+    typeI_init = mean(typeI_init),
+    typeI_fin = mean(typeI_fin),
+    typeII_init = mean(typeII_init),
+    typeII_fin = mean(typeII_fin),
+    agree_init = mean(agree_init),
+    agree_fin = mean(agree_fin),
+    conflict_init = mean(conflict_init),
+    conflict_fin = mean(conflict_fin),
+    revised_per_ai = mean(revised_per_ai),
+    revised_agst_ai = mean(revised_agst_ai),
+    fully_complt = mean(fully_complt),
+    confidence_init_total = mean(confidence_init_total),
+    confidence_fin_total = mean(confidence_fin_total),
+    complt_init = mean(complt_init),
+    complt_fin = mean(complt_fin),
+    ai_typeI = mean(ai_typeI),
+    ai_typeII = mean(ai_typeII),
+    badloans_num = mean(badloans_num),
+    goodloans_num = mean(goodloans_num),
+    agreement_change = mean(agreement_change),
+    conflict_change	= mean(conflict_change),
+    confidence_change = mean(confidence_change),
+    .groups = "drop"
+  )
+head(df)
+```
+
+## Data Transformation (Post-Aggregation)
+
+```{r}
+# Changing Variant and loanofficer_id to categorical variables
+df$Variant = as.factor(df$Variant)
+df$loanofficer_id = as.factor(df$loanofficer_id)
+
+# Calculating false positive, false negatives, true positives, true negatives for initial loan reviews
+df$FP_init <- df$typeI_init
+df$FN_init <- df$typeII_init
+df$TP_init <- df$badloans_num - df$FN_init
+df$TN_init <- df$complt_init - df$FP_init
+
+df$precision_init <- df$TP_init / (df$TP_init + df$FP_init)
+df$recall_init <- df$TP_init / (df$TP_init + df$FN_init)
+
+df$f1_score_init <- 2 * ((df$precision_init * df$recall_init) / (df$precision_init + df$recall_init))
+
+# Calculating false positives, false negatives, true positives, and true negatives for final loan reviews
+df$FP_fin <- df$typeI_fin
+df$FN_fin <- df$typeII_fin
+df$TP_fin <- df$badloans_num - df$FN_fin
+df$TN_fin <- df$complt_fin - df$FP_fin
+
+df$precision_fin <- df$TP_fin / (df$TP_fin + df$FP_fin)
+df$recall_fin <- df$TP_fin / (df$TP_fin + df$FN_fin)
+
+df$f1_score_fin <- 2 * ((df$precision_fin * df$recall_fin) / (df$precision_fin + df$recall_fin))
+
+# Compute change in precision, recall, and F1
+df$precision_change <- df$precision_fin - df$precision_init
+df$recall_change <- df$recall_fin - df$recall_init
+
+df$f1_score_change <- df$f1_score_fin - df$f1_score_init
+```
+
+```{r}
+df
+```
+
+# Data Visualisation
+
+## Original Data Distribution
+
+```{r}
+df_ori<-read.csv('ADAproject_-5_data.csv')
+```
+
+```{r}
+df_long <- df_ori %>%
+  gather(key = "metric", value = "value", 
+         typeI_init, typeI_fin, typeII_init, typeII_fin, 
+         goodloans_num, badloans_num, 
+         agree_init, agree_fin, 
+         conflict_init, conflict_fin,
+         confidence_init_total, confidence_fin_total) 
+```
+
+```{r}
+ggplot(df_long, aes(x = value, fill = Variant)) +
+  geom_histogram(bins = 20, color = "black", size = 0.15, alpha = 0.7, position = "dodge") +  
+  facet_wrap(~ metric, scales = "free") +  
+  labs(title = "Distribution of Key Metrics by Variant", x = "Value", y = "Count") +
+  theme_minimal() +
+  scale_fill_manual(values = c("#00BFC4", "#F8766D"))  
+```
+
+The distribution of key metrics by Variant suggests that the Treatment group (new model) may improve decision-making by increasing agreement with AI predictions, reducing conflicts, and potentially lowering Type I and Type II errors. Confidence levels appear higher post-AI predictions, indicating greater trust in the new model. While both groups approve a similar number of good loans, there may be a slight reduction in bad loans within the Treatment group. However, statistical tests are needed to confirm these trends and determine whether the new model significantly enhances loan approval accuracy while minimizing financial risk.
+
+```{r}
+ggplot(df_long, aes(x = value)) +
+  geom_histogram(bins = 20, fill = "#00BFC4", color = "black", alpha = 0.7) +
+  facet_wrap(~ metric, scales = "free") + 
+  labs(title = "Distribution of Key Metrics", x = "Value", y = "Count") +
+  theme_minimal() 
+```
+
+The distribution of key metrics in the histograms reveals several patterns. Agreement with AI predictions (both initial and final) appears to be right-skewed, indicating that most loan officers align closely with the model’s recommendations. The number of bad loans follows a discrete distribution, with notable peaks at certain values, suggesting a varying risk appetite among loan officers. Confidence scores (both initial and final) show an increasing trend, implying that officers gain more confidence after seeing AI predictions. Type I and Type II errors decrease significantly in the final stage compared to the initial stage, highlighting the AI model’s impact on reducing false approvals and rejections. Conflict metrics show a decline from the initial to the final stage, suggesting that loan officers adjust their decisions to align with the model’s guidance. These observations provide initial insights into how the AI model influences loan officers’ decision-making effectiveness.
+
+## Cleaned Pre-Aggregation Data
+
+```{r}
+# Summarized count of unique loan officer IDs by Variant
+unique_loan_officers <- df_pre_agg %>%
+  group_by(Variant) %>%
+  summarise(unique_count = n_distinct(loanofficer_id))
+
+# Count of unique loan officers per Variant
+ggplot(unique_loan_officers, aes(x = Variant, y = unique_count, fill = Variant)) +
+  geom_col() +
+  geom_text(aes(label = unique_count), vjust = -0.5) +  # Add count labels above the bars
+  labs(
+    title = "Count of Unique Loan Officers by Variant", 
+    x = "Variant", 
+    y = "Unique Loan Officer Count"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+# Compute the change in confidence
+df_pre_agg <- df_pre_agg %>%
+  mutate(confidence_change = confidence_fin_total - confidence_init_total)
+
+# Boxplot for initial and final confidence scores
+df_pre_agg %>%
+  pivot_longer(cols = c(confidence_init_total, confidence_fin_total),
+               names_to = "Confidence_Stage",
+               values_to = "Confidence_Score") %>%
+  ggplot(aes(x = Variant, y = Confidence_Score, fill = Confidence_Stage)) +
+  geom_boxplot() +
+  ggtitle("Confidence Score Comparison by Variant") +
+  theme_minimal()
+```
+
+```{r}
+# Separate boxplot for change in confidence
+ggplot(df_pre_agg, aes(x = Variant, y = confidence_change, fill = Variant)) +
+  geom_boxplot() +
+  ggtitle("Change in Confidence Score by Variant") +
+  ylab("Confidence Score Change") +
+  theme_minimal()
+```
+
+The boxplot highlights differences in confidence changes between the Control and Treatment groups. The Treatment group shows a higher median confidence increase, suggesting that the new model may reinforce decision-making more effectively. However, greater variance and multiple high outliers indicate that some loan officers experienced a significant confidence boost, while others showed more moderate gains. In contrast, the Control group exhibits a more balanced distribution, with some instances of negative confidence change, implying that the old model may not consistently support decision certainty. The presence of outliers in both groups suggests individual differences in how loan officers respond to AI recommendations. While the Treatment model appears to enhance confidence, further analysis is necessary to determine whether this translates to improved accuracy or potential overconfidence in incorrect decisions.
+
+```{r}
+# Daily average errors by variant
+df_pre_agg %>%
+  group_by(day, Variant) %>%
+  summarise(
+    avg_typeI_init = mean(typeI_init, na.rm = TRUE),
+    avg_typeI_fin = mean(typeI_fin, na.rm = TRUE),
+    avg_typeII_init = mean(typeII_init, na.rm = TRUE),
+    avg_typeII_fin = mean(typeII_fin, na.rm = TRUE),
+    .groups = "drop"  # Suppress grouping warning
+  ) %>%
+  pivot_longer(
+    cols = c(avg_typeI_init, avg_typeI_fin, avg_typeII_init, avg_typeII_fin),
+    names_to = "Error_Type",
+    values_to = "Error_Value"
+  ) %>%
+  mutate(
+    Error_Type = factor(Error_Type, levels = c("avg_typeI_init", "avg_typeII_init", "avg_typeI_fin", "avg_typeII_fin"))
+  ) %>%
+  ggplot(aes(x = day, y = Error_Value, color = Variant, group = Variant)) +
+  geom_line() +
+  facet_wrap(~Error_Type, scales = "free", ncol = 2) +  # Ensure 2 columns to force desired row order
+  ggtitle("Trend of Errors Over Time by Variant") +
+  theme_minimal()
+```
+
+The trend analysis of Type I and Type II errors over time reveals a clear distinction between the Control and Treatment groups. Type I errors (false positives) remain consistently higher in the Control group throughout the experiment, both at the initial and final decision stages. In contrast, the Treatment group demonstrates a notable decline in Type I errors over time, particularly in the final stage, indicating improved decision-making with the new AI model. For Type II errors (false negatives), both groups show fluctuations, but the Treatment group generally maintains lower error rates, especially towards the later days of the experiment. This suggests that the new model is helping loan officers reduce incorrect loan approvals more effectively than the existing system. Overall, the Treatment group appears to benefit from the new model, showing a reduction in both error types over time, whereas the Control group maintains relatively higher and more erratic error patterns. This supports the hypothesis that the updated AI model enhances decision accuracy, particularly in mitigating false approvals and rejections.
+
+```{r}
+# Histograms of Change in Type 1 Errors for each Variant
+type1_change_dist = ggplot(df_pre_agg) + geom_histogram(aes(type1_ratio_change, fill = Variant), binwidth = 0.1, colour = "black") + 
+  labs(title = "Daily change in Type 1 error % per Loan Officer", x = 'Change in Type 1 Error %', y = 'Frequency(Count)', fill = 'Variant') + 
+  facet_wrap(.~Variant, nrow = 1) + theme_bw() +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 5))  # Ensures frequent y-axis labels
+
+type2_change_dist = ggplot(df_pre_agg) + geom_histogram(aes(type2_ratio_change, fill = Variant), binwidth = 0.1, colour = "black") + 
+  labs(title = "Daily change in Type 2 error % per Loan Officer", x = 'Change in Type 2 Error %', y = 'Frequency(Count)', fill = 'Variant') + 
+  facet_wrap(.~Variant, nrow = 1) + theme_bw() +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 5))  # Ensures frequent y-axis labels
+
+# Using grid.arrange to display all distributions together
+grid.arrange(type1_change_dist, type2_change_dist, ncol = 1, top = "Histograms of Change in Errors by Variant")
+```
+
+The distributions reconfirm what the datatable tells us, that the treatment group has generally lower initial and final errors. From the distributions of the change in errors, we can see that while a majority of loan officer decisions are unchanged, the control saw an increase in type 1 errors while type 2 erros remained unchanged, while the treatment saw a decrease in both type 1 and type 2 errors.
+
+Importantly, the distributions of the change in errors are relatively normal, making them appropriate for a t-test.
+
+```{r}
+# Histograms of Change in Agreement for each Variant
+agreement_change_dist = ggplot(df_pre_agg) + geom_histogram(aes(agreement_change, fill = Variant), binwidth = 1, colour = "black") + 
+  labs(title = "Change in Loan Officer and AI Agreement", x = 'Change in Agreement', y = 'Frequency(Count)', fill = 'Variant') + 
+  facet_wrap(.~Variant, nrow = 1) + theme_bw() +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 5))  # Ensures frequent y-axis labels
+
+conflict_change_dist = ggplot(df_pre_agg) + geom_histogram(aes(conflict_change, fill = Variant), binwidth = 1, colour = "black") + 
+  labs(title = "Change in Loan Officer and AI Conflict", x = 'Change in Conflict', y = 'Frequency(Count)', fill = 'Variant') + 
+  facet_wrap(.~Variant, nrow = 1)  + theme_bw() +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 5))  # Ensures frequent y-axis labels
+
+# Using grid.arrange to display all distributions together
+grid.arrange(agreement_change_dist, conflict_change_dist, ncol = 1, top = "Histograms of Change in Agreements and Conflict by Variant")
+```
+
+In both the treatment and control, initial agreements are relatively high. Additionally, both variants tend to increase their agreement in their final decision although the treatment agreed more than the control.
+
+The treatment group had higher initial and final confidence. The change in confidence for both groups was similarly distributed, but the treatment had high more instances of large changes in confidence while the control had more instances of a moderate change in confidence.
+
+## Cleaned Post-Aggregation Data
+
+```{r}
+# Compute correlation matrix for change variables only
+cor_vars <- df %>%
+  select(ends_with("change")) %>%  
+  cor(use = "complete.obs")  # Use only complete data rows
+
+# Visualize the correlation matrix with a heatmap
+corrplot(cor_vars, method = "circle", type = "upper", tl.cex = 0.7)
+```
+
+The correlation matrix heatmap shows the relationships between different change variables, where the color and size of circles indicate the strength and direction of correlations. Agreement change is strongly negatively correlated with conflict change, suggesting that as agreement increases, conflict decreases. Confidence change is positively correlated with agreement change and negatively correlated with conflict change, implying that higher confidence leads to better alignment with decisions and fewer disagreements. Precision, recall, and F1-score changes are positively correlated, reflecting their interconnected nature in evaluating model performance. Overall, the heatmap highlights key dependencies between decision adjustments and model performance metrics.
+
+```{r}
+ggplot(df, aes(x = f1_score_change, fill = Variant)) +
+  geom_histogram(binwidth = 0.05, color = "black", alpha = 0.7) +
+  labs(
+    title = "Distribution of F1 score change by Variant",
+    x = "F1 score",
+    y = "Count",
+    fill = "Variant"
+  ) +
+  theme_minimal() +
+  scale_fill_manual(values = c("#00BFC4", "#F8766D")) +  
+  facet_wrap(~ Variant, scales = "free_y")  # Separate histograms by Variant
+```
+
+The histogram displays the distribution of F1 score changes for Control and Treatment. The Control group has a narrow distribution with most values clustered around zero, indicating minimal change in F1 score. In contrast, the Treatment group exhibits a wider spread with a noticeable positive shift, suggesting greater improvements in F1 score. The higher frequency of larger F1 score changes in the Treatment group implies that the applied intervention had a more significant impact on performance compared to the Control.
+
+# Data Analysis
+
+## f1_score_change
+
+### t-test
+
+This code performs an **independent two-sample t-test** to compare the mean `f1_score_change` between different `Variant` groups, assuming unequal variances (`var.equal = FALSE`).
+
+```{r}
+t_test <- t.test(f1_score_change ~ Variant, data = df, var.equal = FALSE)
+print(t_test)
+```
+
+The Welch’s t-test result indicates a statistically significant difference in `f1_score_change` between the `Control` and `Treatment` groups (t(35.40) = -4.6274, p = 4.813e-05). Since the p-value is much smaller than 0.05, we reject the null hypothesis, suggesting that the two groups have different means. The 95% confidence interval [-0.1256, -0.0490] does not include 0, further supporting a significant difference. The `Control` group has a lower mean (-0.0030) compared to the `Treatment` group (0.0843), indicating an improvement in `f1_score_change` for the Treatment group.
+
+### Effect Size
+
+This code calculates **Cohen’s d**, a measure of **effect size**, to quantify the difference in `f1_score_change` between the `Control` and `Treatment` groups. It first subsets the data into separate vectors (`control` and `treatment`), then applies `cohens_d()` to compute the standardized mean difference, indicating how large the effect of `Variant` is on `f1_score_change`.
+
+```{r}
+control = df$f1_score_change[df$Variant == 'Control']
+treatment = df$f1_score_change[df$Variant == 'Treatment']
+cohens_d(control, treatment)
+```
+
+The Cohen's d result (-1.18) indicates a large effect size, suggesting a substantial difference in f1_score_change between the `Control` and `Treatment` groups. The 95% confidence interval [-1.95, -0.40] shows the possible range of the true effect size, with the lower bound (-1.95) suggesting a very large effect and the upper bound (-0.40) still indicating a moderate to large effect. Since the confidence interval does not include 0, this further supports a meaningful difference between the groups.
+
+```{r}
+effectsize::interpret_cohens_d(-1.18)
+```
+
+The result **"large"** confirms that Cohen's d value of **-1.18** corresponds to a **large effect size** based on **Cohen's (1988) interpretation guidelines**.
+
+### Statistical Power
+
+```{r}
+df %>%
+  count(Variant) %>%
+  print()
+```
+
+This code calculates the harmonic mean of two unequal sample sizes (`n1 = 10`, `n2 = 28`) to estimate an effective sample size (`n_eff`) for power analysis. It then uses `pwr.t.test()` to **determine the statistical power** of a two-sample t-test with an effect size of Cohen’s d = 0.95, a significance level of 0.05, and the adjusted sample size. This helps assess whether the study has enough power to detect a meaningful difference between groups.
+
+```{r}
+pwr.t2n.test(n1 = 10, n2 = 28, d = -1.18, sig.level = 0.05)
+```
+
+The power analysis result shows that with sample sizes of n1 = 10 and n2 = 28, an effect size of 1.18 (Cohen's d), and a significance level of 0.05, the statistical power is 0.88 (or 87.63%). This means there is an 88% probability of correctly detecting a true effect if one exists. Since the standard target for power is 80% or higher, this study has sufficient power to detect a meaningful difference between groups.
+
+This calculation helps assess whether the sample size is adequate for a two-sample t-test with the given parameters, ensuring robust statistical conclusions.
+
+```{r}
+pwr.t.test(d = -1.18, power = 0.8, sig.level = 0.05, type = "two.sample")
+```
+
+The power analysis result indicates that at least 12.31 participants per Variant group are required to achieve 80% power for detecting an effect size of Cohen’s d = 1.18 at a 0.05 significance level. This means the study has an 80% chance of correctly detecting a true difference between groups if one exists, ensuring sufficient statistical power. Since the sample size must be an integer, rounding up to at least 13 participants per group would be recommended for practical implementation.
+
+## recall_change
+
+### t-test
+
+This code performs an **independent two-sample t-test** to compare the mean `recall_change` between different `Variant` groups, assuming unequal variances (`var.equal = FALSE`).
+
+```{r}
+t_test <- t.test(recall_change ~ Variant, data = df, var.equal = FALSE)
+print(t_test)
+```
+
+The Welch’s t-test result indicates a statistically significant difference in `recall_change` between the `Control` and `Treatment` groups (t(35.82) = -2.6831, p = 0.01097). Since the p-value is smaller than 0.05, we reject the null hypothesis, suggesting that the two groups have different means. The 95% confidence interval [-0.1351, -0.0188] does not include 0, further supporting a significant difference. The `Control` group has a lower mean (0.0111) compared to the `Treatment` group (0.0881), indicating an increase in recall change for the `Treatment` group.
+
+### Effect Size
+
+This code calculates **Cohen’s d**, a measure of **effect size**, to quantify the difference in `recall_change` between the `Control` and `Treatment` groups. It first subsets the data into separate vectors (`control` and `treatment`), then applies `cohens_d()` to compute the standardized mean difference, indicating how large the effect of `Variant` is on `recall_change`.
+
+```{r}
+control = df$recall_change[df$Variant == 'Control']
+treatment = df$recall_change[df$Variant == 'Treatment']
+cohens_d(control, treatment)
+```
+
+The Cohen's d result (-0.67) indicates a moderate effect size, suggesting a meaningful difference in `recall_change` between the `Control` and `Treatment` groups. The 95% confidence interval [-1.41, 0.07] shows the possible range of the true effect size, with the lower bound (-1.41) suggesting a large effect and the upper bound (0.07) approaching zero. [Since the confidence interval includes 0, there is some uncertainty about the true effect size]{.underline}, meaning the observed difference should be interpreted with caution.
+
+```{r}
+effectsize::interpret_cohens_d(-0.67)
+```
+
+The result "medium" confirms that Cohen's d value of -0.67 corresponds to a medium effect size based on Cohen's (1988) interpretation guidelines.
+
+### Statistical Power
+
+```{r}
+df %>%
+  count(Variant) %>%
+  print()
+```
+
+This code calculates the harmonic mean of two unequal sample sizes (`n1 = 10`, `n2 = 28`) to estimate an effective sample size (`n_eff`) for power analysis. It then uses `pwr.t.test()` to **determine the statistical power** of a two-sample t-test with an effect size of Cohen’s d = -0.67, a significance level of 0.05, and the adjusted sample size. This helps assess whether the study has enough power to detect a meaningful difference between groups.
+
+```{r}
+pwr.t2n.test(n1 = 10, n2 = 28, d = -0.67, sig.level = 0.05)
+```
+
+The power analysis result shows that with sample sizes of n1 = 10 and n2 = 28, an effect size of 0.67 (Cohen's d), and a significance level of 0.05, the statistical power is 0.42 (or 42.48%). This means there is only a 42% probability of correctly detecting a true effect if one exists. Since the standard target for power is 80% or higher, this study has insufficient power, suggesting that a larger sample size may be needed to detect a meaningful difference with greater confidence.
+
+This code **calculates the** **minimum sample size per group** needed for a two-sample t-test with an effect size of -0.67 (Cohen’s d), 80% power, and a significance level of 0.05. It helps determine the required number of observations to detect a meaningful difference between groups with sufficient statistical confidence.
+
+```{r}
+pwr.t.test(d = -0.67, power = 0.8, sig.level = 0.05, type = "two.sample")
+```
+
+The power analysis result indicates that at least 35.96 participants per `Variant` group are required to achieve 80% power for detecting an effect size of Cohen’s d = 0.67 at a 0.05 significance level. This means the study has an 80% chance of correctly detecting a true difference between groups if one exists, ensuring sufficient statistical power. Since the sample size must be an integer, rounding up to at least 36 participants per group would be recommended for practical implementation.
+
+## precision_change
+
+### t-test
+
+This code performs an **independent two-sample t-test** to compare the mean `precision_change` between different `Variant` groups, assuming unequal variances (`var.equal = FALSE`).
+
+```{r}
+t_test <- t.test(precision_change ~ Variant, data = df, var.equal = FALSE)
+print(t_test)
+```
+
+The Welch’s t-test result indicates a statistically significant difference in precision_change between the `Control` and `Treatment` groups (t(35.94) = -4.2597, p = 0.0001407). Since the p-value is much smaller than 0.05, we reject the null hypothesis, suggesting that the two groups have different means. The 95% confidence interval [-0.1058, -0.0376] does not include 0, further supporting a significant difference. The `Control` group has a lower mean (-0.0071) compared to the `Treatment` group (0.0646), indicating an increase in precision change for the `Treatment` group.
+
+### Effect Size
+
+This code calculates **Cohen’s d**, a measure of **effect size**, to quantify the difference in `precision_change` between the `Control` and `Treatment` groups. It first subsets the data into separate vectors (`control` and `treatment`), then applies `cohens_d()` to compute the standardized mean difference, indicating how large the effect of `Variant` is on `precision_change`.
+
+```{r}
+control = df$precision_change[df$Variant == 'Control']
+treatment = df$precision_change[df$Variant == 'Treatment']
+cohens_d(control, treatment)
+```
+
+The Cohen's d result (-1.04) indicates a large effect size, suggesting a substantial difference in precision_change between the Control and Treatment groups. The 95% confidence interval [-1.80, -0.27] shows the possible range of the true effect size, with the lower bound (-1.80) suggesting a very large effect and the upper bound (-0.27) indicating at least a small-to-moderate effect. Since the confidence interval does not include 0, this further supports a meaningful difference between the groups.
+
+```{r}
+effectsize::interpret_cohens_d(-1.04)
+```
+
+The result **"large"** confirms that Cohen's d value of **-1.04** corresponds to a **large effect size** based on **Cohen's (1988) interpretation guidelines**.
+
+### Statistical Power
+
+```{r}
+df %>%
+  count(Variant) %>%
+  print()
+```
+
+This code calculates the harmonic mean of two unequal sample sizes (`n1 = 10`, `n2 = 28`) to estimate an effective sample size (`n_eff`) for power analysis. It then uses `pwr.t.test()` to **determine the statistical power** of a two-sample t-test with an effect size of Cohen’s d = 0.95, a significance level of 0.05, and the adjusted sample size. This helps assess whether the study has enough power to detect a meaningful difference between groups.
+
+```{r}
+pwr.t2n.test(n1 = 10, n2 = 28, d = -1.04, sig.level = 0.05)
+```
+
+The power analysis result shows that with sample sizes of n1 = 10 and n2 = 28, an effect size of 1.04 (Cohen's d), and a significance level of 0.05, the statistical power is 0.78 (or 78.44%). This means there is a 78% probability of correctly detecting a true effect if one exists. Since the standard target for power is 80% or higher, this study is close to sufficient power but slightly below the ideal threshold, suggesting that a slightly larger sample size may improve the reliability of the results.
+
+This code **calculates the** **minimum sample size per group** needed for a two-sample t-test with an effect size of -1.04 (Cohen’s d), 80% power, and a significance level of 0.05. It helps determine the required number of observations to detect a meaningful difference between groups with sufficient statistical confidence.
+
+```{r}
+pwr.t.test(d = -1.04, power = 0.8, sig.level = 0.05, type = "two.sample")
+```
+
+The power analysis result indicates that at least 15.53 participants per Variant group are required to achieve 80% power for detecting an effect size of Cohen’s d = 1.04 at a 0.05 significance level. This means the study has an 80% chance of correctly detecting a true difference between groups if one exists, ensuring sufficient statistical power. Since the sample size must be an integer, rounding up to at least 16 participants per group would be recommended for practical implementation.
+
+# Change Visualised
+
+## Unit Change
+
+```{r}
+
+# Calculate mean values for each metric by Variant (for bar plots)
+summary_df <- df %>%
+  group_by(Variant) %>%
+  summarise(
+    avg_f1_score = mean(f1_score_change, na.rm = TRUE),
+    avg_precision = mean(precision_change, na.rm = TRUE),
+    avg_recall = mean(recall_change, na.rm = TRUE)
+  ) %>%
+  pivot_longer(cols = c(avg_f1_score, avg_precision, avg_recall), 
+               names_to = "Metric", values_to = "Value")
+
+# Rename metric labels for better readability
+summary_df$Metric <- factor(summary_df$Metric, 
+                            levels = c("avg_f1_score", "avg_precision", "avg_recall"),
+                            labels = c("F1 Score Change", "Precision Change", "Recall Change"))
+
+# Bar Plot
+bar_plot <- ggplot(summary_df, aes(x = Metric, y = Value, fill = Variant)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  theme_minimal() +
+  labs(title = "Average Unit Change in F1 Score, Precision, and Recall by Variant",
+       x = "Metric", y = "Average Change") +
+  scale_fill_manual(values = c("Control" = "#00BFC4", "Treatment" = "#F8766D")) +
+  theme(text = element_text(size = 12))
+
+# Box Plot (for distribution of changes)
+box_plot <- df %>%
+  pivot_longer(cols = c(f1_score_change, precision_change, recall_change), 
+               names_to = "Metric", values_to = "Value") %>%
+  mutate(Metric = factor(Metric, 
+                         levels = c("f1_score_change", "precision_change", "recall_change"),
+                         labels = c("F1 Score Change", "Precision Change", "Recall Change"))) %>%
+  ggplot(aes(x = Metric, y = Value, fill = Variant)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +  # Box plot with transparent fill
+  geom_jitter(position = position_jitterdodge(jitter.width = 0), alpha = 0.5) +  # Add scatter points
+  theme_minimal() +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 5)) +
+  labs(title = "Distribution of F1 Score, Precision, and Recall Changes by Variant",
+       x = "Metric", y = "Unit Change") +
+  scale_fill_manual(values = c("Control" = "#00BFC4", "Treatment" = "#F8766D")) +
+  theme(text = element_text(size = 12))
+
+# Print both plots
+print(bar_plot)
+print(box_plot)
+
+```
+
+## Percentage Change
+
+Percentage change per metric in each Variant, i.e., the % by which the metric improved.
+
+```{r}
+summary_df <- df %>%
+  group_by(Variant) %>%
+  summarise(
+    f1_score_change_perc = ((mean(f1_score_fin) - mean(f1_score_init)) / mean(f1_score_init)) * 100,
+    recall_change_perc = ((mean(recall_fin) - mean(recall_init)) / mean(recall_init)) * 100,
+    precision_change_perc = ((mean(precision_fin) - mean(precision_init)) / mean(precision_init)) * 100
+  ) %>%
+  pivot_longer(cols = c(f1_score_change_perc, recall_change_perc, precision_change_perc), 
+               names_to = "Metric", values_to = "Value") %>%
+  pivot_wider(names_from = Variant, values_from = Value)
+summary_df
+```
+
+```{r}
+# Ensure summary_df is in long format before plotting
+summary_df_long <- summary_df %>%
+  pivot_longer(cols = -Metric, names_to = "Variant", values_to = "Value")
+
+# Create the bar plot
+ggplot(summary_df_long, aes(x = Metric, y = Value, fill = Variant)) +
+  geom_bar(stat = "identity", position = "dodge") +  # Side-by-side bars
+  labs(title = "Percentage Change in Performance Metrics",
+       x = "Metric",
+       y = "Percentage Change (%)",
+       fill = "Variant") +
+  theme_minimal() +
+  geom_text(aes(label = round(Value, 1)), vjust = -0.5, position = position_dodge(0.9)) +  # Show values on bars
+  scale_fill_manual(values = c("Control" = "#00BFC4", "Treatment" = "#F8766D"))  # Custom colors
+```
